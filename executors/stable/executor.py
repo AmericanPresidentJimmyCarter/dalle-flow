@@ -25,6 +25,7 @@ from omegaconf import OmegaConf
 
 VALID_SAMPLERS = {'ddim'}
 
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import optimizedSD
 
@@ -48,19 +49,6 @@ class StableDiffusionConfig:
     seed = 1
     unet_bs = 1
     width = 512
-
-
-class KCFGDenoiser(nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.inner_model = model
-
-    def forward(self, x, sigma, uncond, cond, cond_scale):
-        x_in = torch.cat([x] * 2)
-        sigma_in = torch.cat([sigma] * 2)
-        cond_in = torch.cat([uncond, cond])
-        uncond, cond = self.inner_model(x_in, sigma_in, cond=cond_in).chunk(2)
-        return uncond + (cond - uncond) * cond_scale
 
 
 def chunk(it, size):
@@ -92,8 +80,12 @@ def get_obj_from_str(string, reload=False):
     return getattr(importlib.import_module(module, package=None), cls)
 
 
-def load_img(path):
-    image = Image.open(path).convert("RGB")
+def load_img(path, img=None):
+    image = None
+    if img is None:
+        image = Image.open(path).convert("RGB")
+    else:
+        image = img
     w, h = image.size
     w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
     image = image.resize((w, h), resample=PIL.Image.LANCZOS)
@@ -101,6 +93,37 @@ def load_img(path):
     image = image[None].transpose(0, 3, 1, 2)
     image = torch.from_numpy(image)
     return 2.*image - 1.
+
+
+def slerp(t, v0, v1, DOT_THRESHOLD=0.9995):
+    """
+    helper function to spherically interpolate two arrays v1 v2
+
+    from @xsteenbrugge
+    """
+
+    if not isinstance(v0, np.ndarray):
+        inputs_are_torch = True
+        input_device = v0.device
+        v0 = v0.cpu().numpy()
+        v1 = v1.cpu().numpy()
+
+    dot = np.sum(v0 * v1 / (np.linalg.norm(v0) * np.linalg.norm(v1)))
+    if np.abs(dot) > DOT_THRESHOLD:
+        v2 = (1 - t) * v0 + t * v1
+    else:
+        theta_0 = np.arccos(dot)
+        sin_theta_0 = np.sin(theta_0)
+        theta_t = theta_0 * t
+        sin_theta_t = np.sin(theta_t)
+        s0 = np.sin(theta_0 - theta_t) / sin_theta_0
+        s1 = sin_theta_t / sin_theta_0
+        v2 = s0 * v0 + s1 * v1
+
+    if inputs_are_torch:
+        v2 = torch.from_numpy(v2).to(input_device)
+
+    return v2
 
 
 class StableDiffusionGenerator(Executor):
@@ -117,6 +140,7 @@ class StableDiffusionGenerator(Executor):
     modelFS = None
     model_k_wrapped = None
     model_k_config = None
+    sampler = None
     sample = None
 
     def __init__(self,
@@ -182,11 +206,31 @@ class StableDiffusionGenerator(Executor):
         self.modelCS = modelCS
         self.modelFS = modelFS
 
-        self.sample = model.sample
+        self.sample = self.model.sample
 
         model.make_schedule(
             ddim_num_steps=self.opt.ddim_steps, ddim_eta=self.opt.ddim_eta,
                 verbose=False)
+
+    def to_cuda_modelcs(self):
+        self.modelCS.to(self.device)
+
+    def to_cpu_modelcs(self):
+        mem = torch.cuda.memory_allocated() / 1e6
+        self.modelCS.to("cpu")
+        while torch.cuda.memory_allocated() / 1e6 >= mem:
+            time.sleep(1)
+        torch.cuda.empty_cache()
+
+    def to_cuda_modelfs(self):
+        self.modelFS.to(self.device)
+
+    def to_cpu_modelfs(self):
+        mem = torch.cuda.memory_allocated() / 1e6
+        self.modelFS.to("cpu")
+        while torch.cuda.memory_allocated() / 1e6 >= mem:
+            time.sleep(1)
+        torch.cuda.empty_cache()
 
     @requests(on='/')
     def txt2img(self, docs: DocumentArray, parameters: Dict, **kwargs):
@@ -229,7 +273,7 @@ class StableDiffusionGenerator(Executor):
                     self.logger.info(f'stable diffusion start {num_images} images, prompt "{prompt}"...')
                     for n in trange(n_iter, desc="Sampling"):
                         for prompts in tqdm(data, desc="data"):
-                            self.modelCS.to(self.device)
+                            self.to_cuda_modelcs()
                             uc = None
                             if opt.scale != 1.0:
                                 uc = self.modelCS.get_learned_conditioning(batch_size * [""])
@@ -238,13 +282,8 @@ class StableDiffusionGenerator(Executor):
                             c = self.modelCS.get_learned_conditioning(prompts)
                             shape = [opt.C, opt.height // opt.f, opt.width // opt.f]
 
-                            mem = torch.cuda.memory_allocated() / 1e6
-                            self.modelCS.to("cpu")
-                            while torch.cuda.memory_allocated() / 1e6 >= mem:
-                                time.sleep(1)
-                            torch.cuda.empty_cache()
-
-                            self.modelFS.to(self.device)  
+                            self.to_cpu_modelcs()
+                            self.to_cuda_modelfs()
 
                             samples = None
                             if sampler == 'ddim':
@@ -281,13 +320,8 @@ class StableDiffusionGenerator(Executor):
                                 _d.text = prompt
                                 d.matches.append(_d)
                             
-                            mem = torch.cuda.memory_allocated() / 1e6
-                            self.modelFS.to("cpu")
-                            while torch.cuda.memory_allocated() / 1e6 >= mem:
-                                time.sleep(1)
-                            torch.cuda.empty_cache()
+                            self.to_cpu_modelfs()
     
-
     @requests(on='/stablediffuse')
     def stablediffuse(self, docs: DocumentArray, parameters: Dict, **kwargs):
         '''
@@ -347,8 +381,7 @@ class StableDiffusionGenerator(Executor):
                     init_image = load_img(temp_file_path).to(self.device)
                     init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
 
-                    self.modelFS.to(self.device)
-
+                    self.to_cuda_modelfs()
                     init_latent = None
                     if not latentless:
                         init_latent = self.modelFS.get_first_stage_encoding(
@@ -360,16 +393,11 @@ class StableDiffusionGenerator(Executor):
                             opt.height >> 3,
                             opt.width >> 3,
                         ).cuda()
-
-                    mem = torch.cuda.memory_allocated() / 1e6
-                    self.modelFS.to("cpu")
-                    while torch.cuda.memory_allocated() / 1e6 >= mem:
-                        time.sleep(1)
-                    torch.cuda.empty_cache()
+                    self.to_cpu_modelfs()
 
                     for n in trange(n_iter, desc="Sampling"):
                         for prompts in tqdm(data, desc="data"):
-                            self.modelCS.to(self.device)
+                            self.to_cuda_modelcs()
 
                             uc = None
                             if opt.scale != 1.0:
@@ -378,11 +406,7 @@ class StableDiffusionGenerator(Executor):
                                 prompts = list(prompts)
                             c = self.modelCS.get_learned_conditioning(prompts)
 
-                            mem = torch.cuda.memory_allocated() / 1e6
-                            self.modelCS.to("cpu")
-                            while torch.cuda.memory_allocated() / 1e6 >= mem:
-                                time.sleep(1)
-                            torch.cuda.empty_cache()
+                            self.to_cpu_modelcs()
 
                             samples = None
                             # encode (scaled latent)
@@ -398,7 +422,7 @@ class StableDiffusionGenerator(Executor):
                                 unconditional_guidance_scale=opt.scale,
                                 unconditional_conditioning=uc)
 
-                            self.modelFS.to(self.device)
+                            self.to_cuda_modelfs()
 
                             x_samples = self.modelFS.decode_first_stage(samples)
                             x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
@@ -421,10 +445,168 @@ class StableDiffusionGenerator(Executor):
                                 _d.text = prompt
                                 d.matches.append(_d)
 
-                            mem = torch.cuda.memory_allocated() / 1e6
-                            self.modelFS.to("cpu")
-                            while torch.cuda.memory_allocated() / 1e6 >= mem:
-                                time.sleep(1)
-                            torch.cuda.empty_cache()
+                            self.to_cpu_modelfs()
 
                         shutil.rmtree(input_path, ignore_errors=True)
+
+    @requests(on='/stableinterpolate')
+    def stableinterpolate(self, docs: DocumentArray, parameters: Dict, **kwargs):
+        '''
+        Create a series of images that are interpolations between two prompts.
+        '''
+        request_time = time.time()
+
+        num_images = max(1, min(16, int(parameters.get('num_images', 1))))
+        sampler = parameters.get('sampler', 'ddim')
+        scale = parameters.get('scale', 7.5)
+        seed = int(parameters.get('seed', randint(0, 2 ** 32 - 1)))
+        strength = parameters.get('strength', 0.75)
+
+        if sampler not in VALID_SAMPLERS:
+            raise ValueError(f'sampler must be in {VALID_SAMPLERS}, got {sampler}')
+
+        opt = self.opt
+        opt.scale = scale
+
+        seed_everything(seed)
+
+        assert 0.5 <= strength <= 1., 'can only work with strength in [0.5, 1.0]'
+        t_enc = int(strength * opt.ddim_steps)
+
+        precision_scope = autocast if opt.precision == "autocast" else nullcontext
+        with torch.no_grad():
+            with precision_scope("cuda"):
+                for d in docs:
+                    batch_size = 1
+                    prompt = d.text
+                    assert prompt is not None
+
+                    prompts = prompt.split('|')
+                    assert len(prompts) == 2, 'can only interpolate between two prompts'
+
+                    self.logger.info(f'stable diffusion interpolate start {num_images} images, prompt "{prompt}"...')
+
+                    self.to_cuda_modelcs()
+                    prompt_embedding_start = self.modelCS.get_learned_conditioning(prompts[0].strip())
+                    prompt_embedding_end = self.modelCS.get_learned_conditioning(prompts[1].strip())
+                    self.to_cpu_modelcs()
+
+                    to_iterate = list(enumerate(np.linspace(0, 1, num_images)))
+
+                    # Interate over interpolation percentages.
+                    last_image = None
+                    x_samples = None
+                    for i, percent in to_iterate:
+                        init_image = None
+                        init_latent = None
+
+                        self.to_cuda_modelcs()
+                        uc = None
+                        if opt.scale != 1.0:
+                            uc = self.modelCS.get_learned_conditioning(batch_size * [""])
+                        self.to_cpu_modelcs()
+
+                        self.to_cuda_modelfs()
+                        shape = [opt.C, opt.height // opt.f, opt.width // opt.f]
+                        start_code = None
+                        if opt.fixed_code:
+                            start_code = torch.randn([1, opt.C, opt.height // opt.f,
+                                opt.width // opt.f], device=self.device)
+
+                        c = None
+                        if i < 1:
+                            c = prompt_embedding_start
+                        elif i == len(to_iterate) - 1:
+                            c = prompt_embedding_end
+                        else:
+                            c = slerp(percent, prompt_embedding_start,
+                                prompt_embedding_end)
+
+                        samples = self.sample(
+                            seed=seed,
+                            S=opt.ddim_steps,
+                            conditioning=c,
+                            batch_size=batch_size,
+                            shape=shape,
+                            verbose=False,
+                            unconditional_guidance_scale=opt.scale,
+                            unconditional_conditioning=uc,
+                            eta=opt.ddim_eta,
+                            x_T=start_code)
+
+                        x_samples = self.modelFS.decode_first_stage(samples)
+                        x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
+                        self.to_cpu_modelfs()
+
+                        '''
+                        This is the code used on the main branch, but for some
+                        reason looping img2img diffusion like this results in
+                        bizarre neon noise and patterning, eventually destroying
+                        the image. image2image above works normally and this is
+                        almost the exact same code, so I am not sure what is
+                        wrong.
+
+                        In the meantime it'll just have to work as normal
+                        latent interpolation without any prior image.
+
+                        else:
+                            self.to_cuda_modelfs()
+                            init_image = load_img('', img=last_image).to(self.device)
+                            init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
+                            init_latent = self.modelFS.get_first_stage_encoding(
+                                self.modelFS.encode_first_stage(init_image))
+                            self.to_cpu_modelfs()
+
+                            self.to_cuda_modelcs()
+                            uc = None
+                            if opt.scale != 1.0:
+                                uc = self.modelCS.get_learned_conditioning(batch_size * [""])
+                            self.to_cpu_modelcs()
+
+                            c = None
+                            if i < 1:
+                                c = prompt_embedding_start
+                            elif i == len(to_iterate) - 1:
+                                c = prompt_embedding_end
+                            else:
+                                c = slerp(percent, prompt_embedding_start,
+                                    prompt_embedding_end)
+
+                            # encode (scaled latent)
+                            z_enc = self.model.stochastic_encode(
+                                init_latent,
+                                torch.tensor([t_enc]*batch_size).to(self.device),
+                                seed,
+                                opt.ddim_eta,
+                                opt.ddim_steps,
+                            )
+                            # decode it
+                            samples = self.model.decode(z_enc, c, t_enc,
+                                unconditional_guidance_scale=opt.scale,
+                                unconditional_conditioning=uc)
+
+                            self.to_cuda_modelfs()
+                            x_samples = self.modelFS.decode_first_stage(samples)
+                            x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
+                            self.to_cpu_modelfs()
+                        '''
+
+                        x_sample = 255. * rearrange(x_samples[0].cpu().numpy(), 'c h w -> h w c')
+                        img = Image.fromarray(x_sample.astype(np.uint8))
+
+                        buffered = BytesIO()
+                        img.save(buffered, format='PNG')
+                        last_image = img
+                        _d = Document(
+                            blob=buffered.getvalue(),
+                            mime_type='image/png',
+                            tags={
+                                'text': prompt,
+                                'percent': percent,
+                                'generator': 'stable-diffusion',
+                                'request_time': request_time,
+                                'created_time': time.time(),
+                            },
+                        ).convert_blob_to_datauri()
+                        _d.text = prompt
+                        d.matches.append(_d)

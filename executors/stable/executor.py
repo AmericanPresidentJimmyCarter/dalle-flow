@@ -456,7 +456,8 @@ class StableDiffusionGenerator(Executor):
         '''
         request_time = time.time()
 
-        num_images = max(1, min(16, int(parameters.get('num_images', 1))))
+        num_images = 4 # max(1, min(16, int(parameters.get('num_images', 1))))
+        resample_prior = parameters.get('resample_prior', True)
         sampler = parameters.get('sampler', 'ddim')
         scale = parameters.get('scale', 7.5)
         seed = int(parameters.get('seed', randint(0, 2 ** 32 - 1)))
@@ -496,22 +497,10 @@ class StableDiffusionGenerator(Executor):
                     # Interate over interpolation percentages.
                     last_image = None
                     x_samples = None
+
                     for i, percent in to_iterate:
                         init_image = None
                         init_latent = None
-
-                        self.to_cuda_modelcs()
-                        uc = None
-                        if opt.scale != 1.0:
-                            uc = self.modelCS.get_learned_conditioning(batch_size * [""])
-                        self.to_cpu_modelcs()
-
-                        self.to_cuda_modelfs()
-                        shape = [opt.C, opt.height // opt.f, opt.width // opt.f]
-                        start_code = None
-                        if opt.fixed_code:
-                            start_code = torch.randn([1, opt.C, opt.height // opt.f,
-                                opt.width // opt.f], device=self.device)
 
                         c = None
                         if i < 1:
@@ -522,33 +511,35 @@ class StableDiffusionGenerator(Executor):
                             c = slerp(percent, prompt_embedding_start,
                                 prompt_embedding_end)
 
-                        samples = self.sample(
-                            seed=seed,
-                            S=opt.ddim_steps,
-                            conditioning=c,
-                            batch_size=batch_size,
-                            shape=shape,
-                            verbose=False,
-                            unconditional_guidance_scale=opt.scale,
-                            unconditional_conditioning=uc,
-                            eta=opt.ddim_eta,
-                            x_T=start_code)
+                        if i == 0 or not resample_prior:
+                            self.to_cuda_modelcs()
+                            uc = None
+                            if opt.scale != 1.0:
+                                uc = self.modelCS.get_learned_conditioning(batch_size * [""])
+                            self.to_cpu_modelcs()
 
-                        x_samples = self.modelFS.decode_first_stage(samples)
-                        x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
-                        self.to_cpu_modelfs()
+                            self.to_cuda_modelfs()
+                            shape = [opt.C, opt.height // opt.f, opt.width // opt.f]
+                            start_code = None
+                            if opt.fixed_code:
+                                start_code = torch.randn([1, opt.C, opt.height // opt.f,
+                                    opt.width // opt.f], device=self.device)
 
-                        '''
-                        This is the code used on the main branch, but for some
-                        reason looping img2img diffusion like this results in
-                        bizarre neon noise and patterning, eventually destroying
-                        the image. image2image above works normally and this is
-                        almost the exact same code, so I am not sure what is
-                        wrong.
+                            samples = self.sample(
+                                seed=seed,
+                                S=opt.ddim_steps,
+                                conditioning=c,
+                                batch_size=batch_size,
+                                shape=shape,
+                                verbose=False,
+                                unconditional_guidance_scale=opt.scale,
+                                unconditional_conditioning=uc,
+                                eta=opt.ddim_eta,
+                                x_T=start_code)
 
-                        In the meantime it'll just have to work as normal
-                        latent interpolation without any prior image.
-
+                            x_samples = self.modelFS.decode_first_stage(samples)
+                            x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
+                            self.to_cpu_modelfs()
                         else:
                             self.to_cuda_modelfs()
                             init_image = load_img('', img=last_image).to(self.device)
@@ -573,12 +564,20 @@ class StableDiffusionGenerator(Executor):
                                     prompt_embedding_end)
 
                             # encode (scaled latent)
+                            # Do not reuse noise between sampling, as stochastic_encode
+                            # does by default. Instead iterate the seed.
+                            _, b1, b2, b3 = init_latent.shape
+                            img_shape = (1, b1, b2, b3)
+                            torch.manual_seed(seed + i)
+                            noise = torch.randn(img_shape, device=init_latent.device)
+
                             z_enc = self.model.stochastic_encode(
                                 init_latent,
                                 torch.tensor([t_enc]*batch_size).to(self.device),
                                 seed,
                                 opt.ddim_eta,
                                 opt.ddim_steps,
+                                noise=noise,
                             )
                             # decode it
                             samples = self.model.decode(z_enc, c, t_enc,
@@ -589,7 +588,6 @@ class StableDiffusionGenerator(Executor):
                             x_samples = self.modelFS.decode_first_stage(samples)
                             x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
                             self.to_cpu_modelfs()
-                        '''
 
                         x_sample = 255. * rearrange(x_samples[0].cpu().numpy(), 'c h w -> h w c')
                         img = Image.fromarray(x_sample.astype(np.uint8))

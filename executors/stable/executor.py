@@ -279,70 +279,70 @@ class StableDiffusionGenerator(Executor):
         torch.cuda.empty_cache()
         return x_samples_ddim
 
-    @requests(on='/')
-    def txt2img(self, docs: DocumentArray, parameters: Dict, **kwargs):
-        request_time = time.time()
+    # @requests(on='/')
+    # def txt2img(self, docs: DocumentArray, parameters: Dict, **kwargs):
+    #     request_time = time.time()
 
-        sampler = parameters.get('sampler', 'k_lms')
-        if sampler not in VALID_SAMPLERS:
-            raise ValueError(f'sampler must be in {VALID_SAMPLERS}, got {sampler}')
-        scale = parameters.get('scale', 7.5)
-        num_images = max(1, min(8, int(parameters.get('num_images', 1))))
-        seed = int(parameters.get('seed', randint(0, 2 ** 32 - 1)))
-        opt = self.opt
-        opt.scale = scale
-        steps = min(int(parameters.get('steps', opt.ddim_steps)), MAX_STEPS)
-        height, width = self._h_and_w_from_parameters(parameters, opt)
-        self._height_and_width_check(height, width)
+    #     sampler = parameters.get('sampler', 'k_lms')
+    #     if sampler not in VALID_SAMPLERS:
+    #         raise ValueError(f'sampler must be in {VALID_SAMPLERS}, got {sampler}')
+    #     scale = parameters.get('scale', 7.5)
+    #     num_images = max(1, min(8, int(parameters.get('num_images', 1))))
+    #     seed = int(parameters.get('seed', randint(0, 2 ** 32 - 1)))
+    #     opt = self.opt
+    #     opt.scale = scale
+    #     steps = min(int(parameters.get('steps', opt.ddim_steps)), MAX_STEPS)
+    #     height, width = self._h_and_w_from_parameters(parameters, opt)
+    #     self._height_and_width_check(height, width)
 
-        # If the number of samples we have is more than would currently be
-        # given for n_samples * n_iter, increase n_iter to yield more images.
-        n_samples = opt.n_samples
-        n_iter = opt.n_iter
-        if num_images < n_samples:
-            n_samples = num_images
-        if num_images // n_samples > n_iter:
-            n_iter = num_images // n_samples
-        seed_everything(seed)
+    #     # If the number of samples we have is more than would currently be
+    #     # given for n_samples * n_iter, increase n_iter to yield more images.
+    #     n_samples = opt.n_samples
+    #     n_iter = opt.n_iter
+    #     if num_images < n_samples:
+    #         n_samples = num_images
+    #     if num_images // n_samples > n_iter:
+    #         n_iter = num_images // n_samples
+    #     seed_everything(seed)
 
-        start_code = None
-        if opt.fixed_code:
-            start_code = torch.randn([n_samples, opt.C, height // opt.f,
-                width // opt.f], device=self.device)
+    #     start_code = None
+    #     if opt.fixed_code:
+    #         start_code = torch.randn([n_samples, opt.C, height // opt.f,
+    #             width // opt.f], device=self.device)
 
-        precision_scope = autocast if opt.precision=="autocast" else nullcontext
-        with torch.no_grad():
-            with precision_scope("cuda"):
-                with self.model.ema_scope():
-                    for d in docs:
-                        batch_size = n_samples
-                        prompt = d.text
-                        assert prompt is not None
-                        data = [batch_size * [prompt]]
+    #     precision_scope = autocast if opt.precision=="autocast" else nullcontext
+    #     with torch.no_grad():
+    #         with precision_scope("cuda"):
+    #             with self.model.ema_scope():
+    #                 for d in docs:
+    #                     batch_size = n_samples
+    #                     prompt = d.text
+    #                     assert prompt is not None
+    #                     data = [batch_size * [prompt]]
 
-                        self.logger.info(f'stable diffusion start {num_images} images, prompt "{prompt}"...')
-                        for n in trange(n_iter, desc="Sampling"):
-                            for prompts in tqdm(data, desc="data"):
-                                x_samples_ddim = self._sample_text(prompts, n_samples,
-                                    batch_size, opt, sampler, steps, start_code,
-                                    height=height, width=width)
-                                for x_sample in x_samples_ddim:
-                                    x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                                    img = Image.fromarray(x_sample.astype(np.uint8))
-                                    buffered = BytesIO()
-                                    img.save(buffered, format='PNG')
-                                    _d = Document(
-                                        blob=buffered.getvalue(),
-                                        mime_type='image/png',
-                                        tags={
-                                            'text': prompt,
-                                            'generator': 'stable-diffusion',
-                                            'request_time': request_time,
-                                            'created_time': time.time(),
-                                        },
-                                    ).convert_blob_to_datauri()
-                                    _d.text = prompt
-                                    d.matches.append(_d)
+    #                     self.logger.info(f'stable diffusion start {num_images} images, prompt "{prompt}"...')
+    #                     for n in trange(n_iter, desc="Sampling"):
+    #                         for prompts in tqdm(data, desc="data"):
+    #                             x_samples_ddim = self._sample_text(prompts, n_samples,
+    #                                 batch_size, opt, sampler, steps, start_code,
+    #                                 height=height, width=width)
+    #                             for x_sample in x_samples_ddim:
+    #                                 x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+    #                                 img = Image.fromarray(x_sample.astype(np.uint8))
+    #                                 buffered = BytesIO()
+    #                                 img.save(buffered, format='PNG')
+    #                                 _d = Document(
+    #                                     blob=buffered.getvalue(),
+    #                                     mime_type='image/png',
+    #                                     tags={
+    #                                         'text': prompt,
+    #                                         'generator': 'stable-diffusion',
+    #                                         'request_time': request_time,
+    #                                         'created_time': time.time(),
+    #                                     },
+    #                                 ).convert_blob_to_datauri()
+    #                                 _d.text = prompt
+    #                                 d.matches.append(_d)
 
     @requests(on='/stablediffuse')
     def stablediffuse(self, docs: DocumentArray, parameters: Dict, **kwargs):

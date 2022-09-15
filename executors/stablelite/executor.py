@@ -362,307 +362,307 @@ class StableDiffusionGenerator(Executor):
                             
                             self.to_cpu_modelfs()
     
-    @requests(on='/stablediffuse')
-    def stablediffuse(self, docs: DocumentArray, parameters: Dict, **kwargs):
-        '''
-        Called "img2img" in the scripts of the stable-diffusion repo.
-        '''
-        request_time = time.time()
+    # @requests(on='/stablediffuse')
+    # def stablediffuse(self, docs: DocumentArray, parameters: Dict, **kwargs):
+    #     '''
+    #     Called "img2img" in the scripts of the stable-diffusion repo.
+    #     '''
+    #     request_time = time.time()
 
-        latentless = parameters.get('latentless', False)
-        num_images = max(1, min(8, int(parameters.get('num_images', 1))))
-        prompt_override = parameters.get('prompt', None)
-        sampler = parameters.get('sampler', 'ddim')
-        scale = parameters.get('scale', 7.5)
-        seed = int(parameters.get('seed', randint(0, 2 ** 32 - 1)))
-        strength = parameters.get('strength', 0.75)
+    #     latentless = parameters.get('latentless', False)
+    #     num_images = max(1, min(8, int(parameters.get('num_images', 1))))
+    #     prompt_override = parameters.get('prompt', None)
+    #     sampler = parameters.get('sampler', 'ddim')
+    #     scale = parameters.get('scale', 7.5)
+    #     seed = int(parameters.get('seed', randint(0, 2 ** 32 - 1)))
+    #     strength = parameters.get('strength', 0.75)
 
-        if sampler not in VALID_SAMPLERS:
-            raise ValueError(f'sampler must be in {VALID_SAMPLERS}, got {sampler}')
+    #     if sampler not in VALID_SAMPLERS:
+    #         raise ValueError(f'sampler must be in {VALID_SAMPLERS}, got {sampler}')
 
-        opt = self.opt
-        opt.scale = scale
+    #     opt = self.opt
+    #     opt.scale = scale
 
-        steps = min(int(parameters.get('steps', opt.ddim_steps)), MAX_STEPS)
-        height, width = self._h_and_w_from_parameters(parameters, opt)
-        self._height_and_width_check(height, width)
+    #     steps = min(int(parameters.get('steps', opt.ddim_steps)), MAX_STEPS)
+    #     height, width = self._h_and_w_from_parameters(parameters, opt)
+    #     self._height_and_width_check(height, width)
 
-        # If the number of samples we have is more than would currently be
-        # given for n_samples * n_iter, increase n_iter to yield more images.
-        n_samples = opt.n_samples
-        n_iter = opt.n_iter
-        if num_images < n_samples:
-            n_samples = num_images
-        if num_images // n_samples > n_iter:
-            n_iter = num_images // n_samples
+    #     # If the number of samples we have is more than would currently be
+    #     # given for n_samples * n_iter, increase n_iter to yield more images.
+    #     n_samples = opt.n_samples
+    #     n_iter = opt.n_iter
+    #     if num_images < n_samples:
+    #         n_samples = num_images
+    #     if num_images // n_samples > n_iter:
+    #         n_iter = num_images // n_samples
         
-        seed_everything(seed)
+    #     seed_everything(seed)
 
-        assert 0. <= strength <= 1., 'can only work with strength in [0.0, 1.0]'
-        t_enc = int(strength * opt.ddim_steps)
+    #     assert 0. <= strength <= 1., 'can only work with strength in [0.0, 1.0]'
+    #     t_enc = int(strength * opt.ddim_steps)
 
-        precision_scope = autocast if opt.precision == "autocast" else nullcontext
-        with torch.no_grad():
-            with precision_scope("cuda"):
-                self.model.make_schedule(
-                    ddim_num_steps=steps, ddim_eta=self.opt.ddim_eta,
-                        verbose=False)
+    #     precision_scope = autocast if opt.precision == "autocast" else nullcontext
+    #     with torch.no_grad():
+    #         with precision_scope("cuda"):
+    #             self.model.make_schedule(
+    #                 ddim_num_steps=steps, ddim_eta=self.opt.ddim_eta,
+    #                     verbose=False)
 
-                for d in docs:
-                    batch_size = n_samples
-                    prompt = d.text
-                    if prompt_override is not None:
-                        prompt = prompt_override
-                    assert prompt is not None
-                    self.logger.info(f'stable diffusion img2img start {num_images} images, prompt "{prompt}"...')
-                    data = [batch_size * [prompt]]
+    #             for d in docs:
+    #                 batch_size = n_samples
+    #                 prompt = d.text
+    #                 if prompt_override is not None:
+    #                     prompt = prompt_override
+    #                 assert prompt is not None
+    #                 self.logger.info(f'stable diffusion img2img start {num_images} images, prompt "{prompt}"...')
+    #                 data = [batch_size * [prompt]]
 
-                    input_path = os.path.join(self.input_path, f'{d.id}/')
+    #                 input_path = os.path.join(self.input_path, f'{d.id}/')
 
-                    Path(input_path).mkdir(parents=True, exist_ok=True)
-                    Path(os.path.join(input_path, 'out')).mkdir(parents=True, exist_ok=True)
+    #                 Path(input_path).mkdir(parents=True, exist_ok=True)
+    #                 Path(os.path.join(input_path, 'out')).mkdir(parents=True, exist_ok=True)
 
-                    temp_file_path = os.path.join(input_path, f'{d.id}.png')
-                    d.save_uri_to_file(temp_file_path)
+    #                 temp_file_path = os.path.join(input_path, f'{d.id}.png')
+    #                 d.save_uri_to_file(temp_file_path)
 
-                    assert os.path.isfile(temp_file_path)
-                    init_image = load_img(temp_file_path).to(self.device)
-                    init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
+    #                 assert os.path.isfile(temp_file_path)
+    #                 init_image = load_img(temp_file_path).to(self.device)
+    #                 init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
 
-                    self.to_cuda_modelfs()
-                    init_latent = None
-                    if not latentless:
-                        init_latent = self.modelFS.get_first_stage_encoding(
-                            self.modelFS.encode_first_stage(init_image))  # move to latent space
-                    else:
-                        init_latent = torch.zeros(
-                            batch_size,
-                            4,
-                            height >> 3,
-                            width >> 3,
-                        ).cuda()
-                    self.to_cpu_modelfs()
+    #                 self.to_cuda_modelfs()
+    #                 init_latent = None
+    #                 if not latentless:
+    #                     init_latent = self.modelFS.get_first_stage_encoding(
+    #                         self.modelFS.encode_first_stage(init_image))  # move to latent space
+    #                 else:
+    #                     init_latent = torch.zeros(
+    #                         batch_size,
+    #                         4,
+    #                         height >> 3,
+    #                         width >> 3,
+    #                     ).cuda()
+    #                 self.to_cpu_modelfs()
 
-                    for n in trange(n_iter, desc="Sampling"):
-                        for prompts in tqdm(data, desc="data"):
-                            self.to_cuda_modelcs()
+    #                 for n in trange(n_iter, desc="Sampling"):
+    #                     for prompts in tqdm(data, desc="data"):
+    #                         self.to_cuda_modelcs()
 
-                            uc = None
-                            if opt.scale != 1.0:
-                                uc = self.modelCS.get_learned_conditioning(batch_size * [""])
-                            if isinstance(prompts, tuple):
-                                prompts = list(prompts)
-                            c = self.modelCS.get_learned_conditioning(prompts)
+    #                         uc = None
+    #                         if opt.scale != 1.0:
+    #                             uc = self.modelCS.get_learned_conditioning(batch_size * [""])
+    #                         if isinstance(prompts, tuple):
+    #                             prompts = list(prompts)
+    #                         c = self.modelCS.get_learned_conditioning(prompts)
 
-                            self.to_cpu_modelcs()
+    #                         self.to_cpu_modelcs()
 
-                            samples = None
-                            # encode (scaled latent)
-                            z_enc = self.model.stochastic_encode(
-                                init_latent,
-                                torch.tensor([t_enc]*batch_size).to(self.device),
-                                seed,
-                                opt.ddim_eta,
-                                steps,
-                            )
-                            # decode it
-                            samples = self.model.decode(z_enc, c, t_enc,
-                                unconditional_guidance_scale=opt.scale,
-                                unconditional_conditioning=uc)
+    #                         samples = None
+    #                         # encode (scaled latent)
+    #                         z_enc = self.model.stochastic_encode(
+    #                             init_latent,
+    #                             torch.tensor([t_enc]*batch_size).to(self.device),
+    #                             seed,
+    #                             opt.ddim_eta,
+    #                             steps,
+    #                         )
+    #                         # decode it
+    #                         samples = self.model.decode(z_enc, c, t_enc,
+    #                             unconditional_guidance_scale=opt.scale,
+    #                             unconditional_conditioning=uc)
 
-                            self.to_cuda_modelfs()
+    #                         self.to_cuda_modelfs()
 
-                            x_samples = self.modelFS.decode_first_stage(samples)
-                            x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
+    #                         x_samples = self.modelFS.decode_first_stage(samples)
+    #                         x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
 
-                            for x_sample in x_samples:
-                                x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                                img = Image.fromarray(x_sample.astype(np.uint8))
-                                buffered = BytesIO()
-                                img.save(buffered, format='PNG')
-                                _d = Document(
-                                    blob=buffered.getvalue(),
-                                    mime_type='image/png',
-                                    tags={
-                                        'text': prompt,
-                                        'generator': 'stable-diffusion',
-                                        'request_time': request_time,
-                                        'created_time': time.time(),
-                                    },
-                                ).convert_blob_to_datauri()
-                                _d.text = prompt
-                                d.matches.append(_d)
+    #                         for x_sample in x_samples:
+    #                             x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+    #                             img = Image.fromarray(x_sample.astype(np.uint8))
+    #                             buffered = BytesIO()
+    #                             img.save(buffered, format='PNG')
+    #                             _d = Document(
+    #                                 blob=buffered.getvalue(),
+    #                                 mime_type='image/png',
+    #                                 tags={
+    #                                     'text': prompt,
+    #                                     'generator': 'stable-diffusion',
+    #                                     'request_time': request_time,
+    #                                     'created_time': time.time(),
+    #                                 },
+    #                             ).convert_blob_to_datauri()
+    #                             _d.text = prompt
+    #                             d.matches.append(_d)
 
-                            self.to_cpu_modelfs()
-                            seed += batch_size
-                            seed_everything(seed)
+    #                         self.to_cpu_modelfs()
+    #                         seed += batch_size
+    #                         seed_everything(seed)
 
-                        shutil.rmtree(input_path, ignore_errors=True)
+    #                     shutil.rmtree(input_path, ignore_errors=True)
 
-    @requests(on='/stableinterpolate')
-    def stableinterpolate(self, docs: DocumentArray, parameters: Dict, **kwargs):
-        '''
-        Create a series of images that are interpolations between two prompts.
-        '''
-        request_time = time.time()
+    # @requests(on='/stableinterpolate')
+    # def stableinterpolate(self, docs: DocumentArray, parameters: Dict, **kwargs):
+    #     '''
+    #     Create a series of images that are interpolations between two prompts.
+    #     '''
+    #     request_time = time.time()
 
-        num_images = max(1, min(16, int(parameters.get('num_images', 1))))
-        resample_prior = parameters.get('resample_prior', True)
-        sampler = parameters.get('sampler', 'ddim')
-        scale = parameters.get('scale', 7.5)
-        seed = int(parameters.get('seed', randint(0, 2 ** 32 - 1)))
-        strength = parameters.get('strength', 0.75)
+    #     num_images = max(1, min(16, int(parameters.get('num_images', 1))))
+    #     resample_prior = parameters.get('resample_prior', True)
+    #     sampler = parameters.get('sampler', 'ddim')
+    #     scale = parameters.get('scale', 7.5)
+    #     seed = int(parameters.get('seed', randint(0, 2 ** 32 - 1)))
+    #     strength = parameters.get('strength', 0.75)
 
-        if sampler not in VALID_SAMPLERS:
-            raise ValueError(f'sampler must be in {VALID_SAMPLERS}, got {sampler}')
+    #     if sampler not in VALID_SAMPLERS:
+    #         raise ValueError(f'sampler must be in {VALID_SAMPLERS}, got {sampler}')
 
-        opt = self.opt
-        opt.scale = scale
+    #     opt = self.opt
+    #     opt.scale = scale
 
-        steps = min(int(parameters.get('steps', opt.ddim_steps)), MAX_STEPS)
-        height, width = self._h_and_w_from_parameters(parameters, opt)
-        self._height_and_width_check(height, width)
+    #     steps = min(int(parameters.get('steps', opt.ddim_steps)), MAX_STEPS)
+    #     height, width = self._h_and_w_from_parameters(parameters, opt)
+    #     self._height_and_width_check(height, width)
 
-        seed_everything(seed)
+    #     seed_everything(seed)
 
-        assert 0.5 <= strength <= 1., 'can only work with strength in [0.5, 1.0]'
-        t_enc = int(strength * steps)
+    #     assert 0.5 <= strength <= 1., 'can only work with strength in [0.5, 1.0]'
+    #     t_enc = int(strength * steps)
 
-        precision_scope = autocast if opt.precision == "autocast" else nullcontext
-        with torch.no_grad():
-            with precision_scope("cuda"):
-                self.model.make_schedule(
-                    ddim_num_steps=steps, ddim_eta=self.opt.ddim_eta,
-                        verbose=False)
+    #     precision_scope = autocast if opt.precision == "autocast" else nullcontext
+    #     with torch.no_grad():
+    #         with precision_scope("cuda"):
+    #             self.model.make_schedule(
+    #                 ddim_num_steps=steps, ddim_eta=self.opt.ddim_eta,
+    #                     verbose=False)
 
-                for d in docs:
-                    batch_size = 1
-                    prompt = d.text
-                    assert prompt is not None
+    #             for d in docs:
+    #                 batch_size = 1
+    #                 prompt = d.text
+    #                 assert prompt is not None
 
-                    prompts = prompt.split('|')
-                    assert len(prompts) == 2, 'can only interpolate between two prompts'
+    #                 prompts = prompt.split('|')
+    #                 assert len(prompts) == 2, 'can only interpolate between two prompts'
 
-                    self.logger.info(f'stable diffusion interpolate start {num_images} images, prompt "{prompt}"...')
+    #                 self.logger.info(f'stable diffusion interpolate start {num_images} images, prompt "{prompt}"...')
 
-                    self.to_cuda_modelcs()
-                    prompt_embedding_start = self.modelCS.get_learned_conditioning(prompts[0].strip())
-                    prompt_embedding_end = self.modelCS.get_learned_conditioning(prompts[1].strip())
-                    self.to_cpu_modelcs()
+    #                 self.to_cuda_modelcs()
+    #                 prompt_embedding_start = self.modelCS.get_learned_conditioning(prompts[0].strip())
+    #                 prompt_embedding_end = self.modelCS.get_learned_conditioning(prompts[1].strip())
+    #                 self.to_cpu_modelcs()
 
-                    to_iterate = list(enumerate(np.linspace(0, 1, num_images)))
+    #                 to_iterate = list(enumerate(np.linspace(0, 1, num_images)))
 
-                    # Interate over interpolation percentages.
-                    last_image = None
-                    x_samples = None
+    #                 # Interate over interpolation percentages.
+    #                 last_image = None
+    #                 x_samples = None
 
-                    for i, percent in to_iterate:
-                        init_image = None
-                        init_latent = None
+    #                 for i, percent in to_iterate:
+    #                     init_image = None
+    #                     init_latent = None
 
-                        c = None
-                        if i < 1:
-                            c = prompt_embedding_start
-                        elif i == len(to_iterate) - 1:
-                            c = prompt_embedding_end
-                        else:
-                            c = slerp(percent, prompt_embedding_start,
-                                prompt_embedding_end)
+    #                     c = None
+    #                     if i < 1:
+    #                         c = prompt_embedding_start
+    #                     elif i == len(to_iterate) - 1:
+    #                         c = prompt_embedding_end
+    #                     else:
+    #                         c = slerp(percent, prompt_embedding_start,
+    #                             prompt_embedding_end)
 
-                        if i == 0 or not resample_prior:
-                            self.to_cuda_modelcs()
-                            uc = None
-                            if opt.scale != 1.0:
-                                uc = self.modelCS.get_learned_conditioning(batch_size * [""])
-                            self.to_cpu_modelcs()
+    #                     if i == 0 or not resample_prior:
+    #                         self.to_cuda_modelcs()
+    #                         uc = None
+    #                         if opt.scale != 1.0:
+    #                             uc = self.modelCS.get_learned_conditioning(batch_size * [""])
+    #                         self.to_cpu_modelcs()
 
-                            self.to_cuda_modelfs()
-                            shape = [opt.C, height // opt.f, width // opt.f]
-                            start_code = None
-                            if opt.fixed_code:
-                                start_code = torch.randn([1, opt.C, height // opt.f,
-                                    width // opt.f], device=self.device)
+    #                         self.to_cuda_modelfs()
+    #                         shape = [opt.C, height // opt.f, width // opt.f]
+    #                         start_code = None
+    #                         if opt.fixed_code:
+    #                             start_code = torch.randn([1, opt.C, height // opt.f,
+    #                                 width // opt.f], device=self.device)
 
-                            samples = self.sample(
-                                seed=seed,
-                                S=steps,
-                                conditioning=c,
-                                batch_size=batch_size,
-                                shape=shape,
-                                verbose=False,
-                                unconditional_guidance_scale=opt.scale,
-                                unconditional_conditioning=uc,
-                                eta=opt.ddim_eta,
-                                x_T=start_code)
+    #                         samples = self.sample(
+    #                             seed=seed,
+    #                             S=steps,
+    #                             conditioning=c,
+    #                             batch_size=batch_size,
+    #                             shape=shape,
+    #                             verbose=False,
+    #                             unconditional_guidance_scale=opt.scale,
+    #                             unconditional_conditioning=uc,
+    #                             eta=opt.ddim_eta,
+    #                             x_T=start_code)
 
-                            x_samples = self.modelFS.decode_first_stage(samples)
-                            x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
-                            self.to_cpu_modelfs()
-                        else:
-                            self.to_cuda_modelfs()
-                            init_image = load_img('', img=last_image).to(self.device)
-                            init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
-                            init_latent = self.modelFS.get_first_stage_encoding(
-                                self.modelFS.encode_first_stage(init_image))
-                            self.to_cpu_modelfs()
+    #                         x_samples = self.modelFS.decode_first_stage(samples)
+    #                         x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
+    #                         self.to_cpu_modelfs()
+    #                     else:
+    #                         self.to_cuda_modelfs()
+    #                         init_image = load_img('', img=last_image).to(self.device)
+    #                         init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
+    #                         init_latent = self.modelFS.get_first_stage_encoding(
+    #                             self.modelFS.encode_first_stage(init_image))
+    #                         self.to_cpu_modelfs()
 
-                            self.to_cuda_modelcs()
-                            uc = None
-                            if opt.scale != 1.0:
-                                uc = self.modelCS.get_learned_conditioning(batch_size * [""])
-                            self.to_cpu_modelcs()
+    #                         self.to_cuda_modelcs()
+    #                         uc = None
+    #                         if opt.scale != 1.0:
+    #                             uc = self.modelCS.get_learned_conditioning(batch_size * [""])
+    #                         self.to_cpu_modelcs()
 
-                            c = None
-                            if i < 1:
-                                c = prompt_embedding_start
-                            elif i == len(to_iterate) - 1:
-                                c = prompt_embedding_end
-                            else:
-                                c = slerp(percent, prompt_embedding_start,
-                                    prompt_embedding_end)
+    #                         c = None
+    #                         if i < 1:
+    #                             c = prompt_embedding_start
+    #                         elif i == len(to_iterate) - 1:
+    #                             c = prompt_embedding_end
+    #                         else:
+    #                             c = slerp(percent, prompt_embedding_start,
+    #                                 prompt_embedding_end)
 
-                            # encode (scaled latent)
-                            # Do not reuse noise between sampling, as stochastic_encode
-                            # does by default. Instead iterate the seed.
-                            _, b1, b2, b3 = init_latent.shape
-                            img_shape = (1, b1, b2, b3)
-                            torch.manual_seed(seed + i)
-                            noise = torch.randn(img_shape, device=init_latent.device)
+    #                         # encode (scaled latent)
+    #                         # Do not reuse noise between sampling, as stochastic_encode
+    #                         # does by default. Instead iterate the seed.
+    #                         _, b1, b2, b3 = init_latent.shape
+    #                         img_shape = (1, b1, b2, b3)
+    #                         torch.manual_seed(seed + i)
+    #                         noise = torch.randn(img_shape, device=init_latent.device)
 
-                            z_enc = self.model.stochastic_encode(
-                                init_latent,
-                                torch.tensor([t_enc]*batch_size).to(self.device),
-                                seed,
-                                opt.ddim_eta,
-                                steps,
-                                noise=noise,
-                            )
-                            # decode it
-                            samples = self.model.decode(z_enc, c, t_enc,
-                                unconditional_guidance_scale=opt.scale,
-                                unconditional_conditioning=uc)
+    #                         z_enc = self.model.stochastic_encode(
+    #                             init_latent,
+    #                             torch.tensor([t_enc]*batch_size).to(self.device),
+    #                             seed,
+    #                             opt.ddim_eta,
+    #                             steps,
+    #                             noise=noise,
+    #                         )
+    #                         # decode it
+    #                         samples = self.model.decode(z_enc, c, t_enc,
+    #                             unconditional_guidance_scale=opt.scale,
+    #                             unconditional_conditioning=uc)
 
-                            self.to_cuda_modelfs()
-                            x_samples = self.modelFS.decode_first_stage(samples)
-                            x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
-                            self.to_cpu_modelfs()
+    #                         self.to_cuda_modelfs()
+    #                         x_samples = self.modelFS.decode_first_stage(samples)
+    #                         x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
+    #                         self.to_cpu_modelfs()
 
-                        x_sample = 255. * rearrange(x_samples[0].cpu().numpy(), 'c h w -> h w c')
-                        img = Image.fromarray(x_sample.astype(np.uint8))
+    #                     x_sample = 255. * rearrange(x_samples[0].cpu().numpy(), 'c h w -> h w c')
+    #                     img = Image.fromarray(x_sample.astype(np.uint8))
 
-                        buffered = BytesIO()
-                        img.save(buffered, format='PNG')
-                        last_image = img
-                        _d = Document(
-                            blob=buffered.getvalue(),
-                            mime_type='image/png',
-                            tags={
-                                'text': prompt,
-                                'percent': percent,
-                                'generator': 'stable-diffusion',
-                                'request_time': request_time,
-                                'created_time': time.time(),
-                            },
-                        ).convert_blob_to_datauri()
-                        _d.text = prompt
-                        d.matches.append(_d)
+    #                     buffered = BytesIO()
+    #                     img.save(buffered, format='PNG')
+    #                     last_image = img
+    #                     _d = Document(
+    #                         blob=buffered.getvalue(),
+    #                         mime_type='image/png',
+    #                         tags={
+    #                             'text': prompt,
+    #                             'percent': percent,
+    #                             'generator': 'stable-diffusion',
+    #                             'request_time': request_time,
+    #                             'created_time': time.time(),
+    #                         },
+    #                     ).convert_blob_to_datauri()
+    #                     _d.text = prompt
+    #                     d.matches.append(_d)

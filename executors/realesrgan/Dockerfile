@@ -12,14 +12,10 @@ ENV PIP_NO_CACHE_DIR=1 \
 
 WORKDIR /workdir
 
-RUN git clone --depth=1 https://github.com/timojl/clipseg.git
-RUN cd clipseg
-RUN pip install .
-RUN cd ..
-
 COPY . /workdir/executor
-RUN pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu116
 RUN pip install --no-cache-dir --use-deprecated=legacy-resolver -r ./executor/requirements.txt
+RUN pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu116
+RUN pip install realesrgan
 
 # https://jax.readthedocs.io/en/latest/gpu_memory_allocation.html
 ENV XLA_PYTHON_CLIENT_ALLOCATOR=platform

@@ -29,6 +29,7 @@ DALL·E Flow is in client-server architecture.
 
 ## Updates
 
+- 🌟 **2022/10/01** [RealESRGAN upscalers](https://github.com/xinntao/Real-ESRGAN) have been added.
 - 🌟 **2022/9/25** Automated [CLIP-based segmentation](https://github.com/timojl/clipseg) from a prompt has been added.
 - 🌟 **2022/8/17** Text to image for [Stable Diffusion](https://github.com/CompVis/stable-diffusion) has been added. In order to use it you will need to agree to their ToS, download the weights, then enable the flag in docker or `flow_parser.py`.
 - ⚠️ **2022/8/8** Started using CLIP-as-service as an [external executor](https://docs.jina.ai/fundamentals/flow/add-executors/#external-executors). Now you can easily [deploy your own CLIP executor](#run-your-own-clip) if you want. There is [a small breaking change](https://github.com/jina-ai/dalle-flow/pull/74/files#diff-b335630551682c19a781afebcf4d07bf978fb1f8ac04c6bf87428ed5106870f5R103) as a result of this improvement, so [please _reopen_ the notebook in Google Colab](https://colab.research.google.com/github/jina-ai/dalle-flow/blob/main/client.ipynb).
@@ -251,6 +252,7 @@ DISABLE_GLID3XL
 DISABLE_SWINIR
 ENABLE_STABLE_DIFFUSION
 ENABLE_CLIPSEG
+ENABLE_REALESRGAN
 ```
 
 For example, if you would like to disable GLID3XL workflows, run:
@@ -269,6 +271,7 @@ docker run -e DISABLE_GLID3XL='1' \
 - The first part of `-p 51005:51005` is your host public port. Make sure people can access this port if you are serving publicly. The second par of it is [the port defined in flow.yml](https://github.com/jina-ai/dalle-flow/blob/e7e313522608668daeec1b7cd84afe56e5b19f1e/flow.yml#L4).
 - If you want to use Stable Diffusion, it must be enabled manually with the `ENABLE_STABLE_DIFFUSION`.
 - If you want to use clipseg, it must be enabled manually with the `ENABLE_CLIPSEG`.
+- If you want to use RealESRGAN, it must be enabled manually with the `ENABLE_REALESRGAN`.
 
 #### Special instructions for Stable Diffusion and Docker
 
@@ -317,6 +320,7 @@ You should have the following folder structure:
 ```text
 dalle/
  |
+ |-- Real-ESRGAN/
  |-- SwinIR/
  |-- clipseg/
  |-- dalle-flow/
@@ -335,6 +339,8 @@ pip install torch torchvision torchaudio --extra-index-url https://download.pyto
 pip install numpy tqdm pytorch_lightning einops numpy omegaconf
 pip install https://github.com/crowsonkb/k-diffusion/archive/master.zip
 pip install git+https://github.com/AmericanPresidentJimmyCarter/stable-diffusion.git@v0.0.11
+pip install basicsr facexlib gfpgan
+pip install realesrgan
 cd latent-diffusion && pip install -e . && cd -
 cd stable-diffusion && pip install -e . && cd -
 cd SwinIR && pip install -e . && cd -
@@ -351,6 +357,9 @@ wget https://dall-3.com/models/glid-3-xl/kl-f8.pt
 wget https://dall-3.com/models/glid-3-xl/finetune.pt
 cd -
 ```
+
+Both `clipseg` and `RealESRGAN` require you to set a correct cache folder path,
+typically something like $HOME/.
 
 #### Install flow
 

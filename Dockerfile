@@ -39,6 +39,8 @@ RUN if [ -n "${APT_PACKAGES}" ]; then apt-get update && apt-get install --no-ins
     cd dalle-flow && python3 -m virtualenv --python=/usr/bin/python3.10 env && . env/bin/activate && cd - && \
     pip install --upgrade cython && \
     pip install --upgrade pyyaml && \
+    pip install basicsr facexlib gfpgan && \
+    pip install realesrgan && \
     git clone --depth=1 https://github.com/timojl/clipseg.git && \
     pip install jax[cuda11_cudnn82]==0.3.13 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && \
     pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu116 && \

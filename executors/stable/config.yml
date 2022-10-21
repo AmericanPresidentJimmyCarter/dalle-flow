@@ -6,7 +6,7 @@ with:
   max_resolution: 589824 # 768x768
   n_iter: 1
   use_half: True
-  weights_path: ../stable-diffusion/models/ldm/stable-diffusion-v1/model.ckpt
+  weights_path: /your/weights.ckpt
   width: 512
 metas:
   py_modules:

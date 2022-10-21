@@ -5,7 +5,7 @@ import torch
 from io import BytesIO
 from operator import itemgetter
 from random import randint
-from typing import Dict
+from typing import Dict, Optional
 from urllib.request import urlopen
 
 import numpy as np
@@ -22,6 +22,7 @@ from tqdm import trange
 from jina import Executor, DocumentArray, Document, requests
 
 
+INPAINTING_CONFIG_NAME = 'v1-inpainting.yaml'
 K_DIFF_SAMPLERS = {'k_lms', 'dpm2', 'dpm2_ancestral', 'heun',
     'euler', 'euler_ancestral'}
 
@@ -45,6 +46,7 @@ class StableDiffusionGenerator(Executor):
 
     def __init__(self,
         batch_size: int=4,
+        config_path: Optional[str]=None,
         height: int=512,
         max_n_subprompts=8,
         max_resolution=589824,
@@ -58,6 +60,7 @@ class StableDiffusionGenerator(Executor):
         @batch_size: The number of images to create at the same time. It only
           slightly speeds up inference while dramatically increasing memory
           usage.
+        @config_path: Location for the YAML configuration file for the model.
         @height: Default height of image in pixels.
         @max_n_subprompts: Maximum number of subprompts you can add to an image
           in the denoising step. More subprompts = slower denoising.
@@ -73,6 +76,7 @@ class StableDiffusionGenerator(Executor):
         self.batch_size = batch_size
         self.stable_diffusion_module = StableDiffusionInference(
             checkpoint_loc=weights_path,
+            config_loc=config_path,
             height=height,
             max_n_subprompts=max_n_subprompts,
             max_resolution=max_resolution,
@@ -143,6 +147,11 @@ class StableDiffusionGenerator(Executor):
                     images,
                 ) = itemgetter('conditioning', 'images')(extra_data)
 
+                image_conditioning = None
+                if isinstance(conditioning, dict):
+                    image_conditioning = conditioning['c_concat']
+                    conditioning = conditioning['c_crossattn']
+
                 for img in images:
                     buffered = BytesIO()
                     img.save(buffered, format='PNG')
@@ -151,6 +160,11 @@ class StableDiffusionGenerator(Executor):
                     torch.save(samples, samples_buffer)
                     samples_buffer.seek(0)
 
+                    if image_conditioning is not None:
+                        image_conditioning_buffer = BytesIO()
+                        torch.save(image_conditioning, image_conditioning_buffer)
+                        image_conditioning_buffer.seek(0)
+
                     _d = Document(
                         embedding=conditioning,
                         blob=buffered.getvalue(),
@@ -158,6 +172,9 @@ class StableDiffusionGenerator(Executor):
                         tags={
                             'latent_repr': base64.b64encode(
                                 samples_buffer.getvalue()).decode(),
+                            'image_conditioning': base64.b64encode(
+                                image_conditioning_buffer.getvalue()).decode()
+                                if image_conditioning is not None else None,
                             'request': {
                                 'api': 'txt2img',
                                 'height': height,
@@ -238,6 +255,11 @@ class StableDiffusionGenerator(Executor):
                     images,
                 ) = itemgetter('conditioning', 'images')(extra_data)
 
+                image_conditioning = None
+                if isinstance(conditioning, dict):
+                    image_conditioning = conditioning['c_concat']
+                    conditioning = conditioning['c_crossattn']
+
                 for img in images:
                     buffered = BytesIO()
                     img.save(buffered, format='PNG')
@@ -246,6 +268,11 @@ class StableDiffusionGenerator(Executor):
                     torch.save(samples, samples_buffer)
                     samples_buffer.seek(0)
 
+                    if image_conditioning is not None:
+                        image_conditioning_buffer = BytesIO()
+                        torch.save(image_conditioning, image_conditioning_buffer)
+                        image_conditioning_buffer.seek(0)
+
                     _d = Document(
                         embedding=conditioning,
                         blob=buffered.getvalue(),
@@ -253,6 +280,9 @@ class StableDiffusionGenerator(Executor):
                         tags={
                             'latent_repr': base64.b64encode(
                                 samples_buffer.getvalue()).decode(),
+                            'image_conditioning': base64.b64encode(
+                                image_conditioning_buffer.getvalue()).decode()
+                                if image_conditioning is not None else None,
                             'request': {
                                 'api': 'stablediffuse',
                                 'latentless': latentless,
@@ -379,6 +409,7 @@ class StableDiffusionGenerator(Executor):
                         conditioning=c,
                         height=height,
                         init_latent=samples_last,
+                        # init_pil_image=extra_data['images'][0],
                         prompt_concept_injection_required=False,
                         scale=scale,
                         strength=strength,
@@ -400,6 +431,16 @@ class StableDiffusionGenerator(Executor):
                 torch.save(samples_last, samples_buffer)
                 samples_buffer.seek(0)
 
+                image_conditioning = None
+                if isinstance(c, dict):
+                    image_conditioning = c['c_concat']
+                    c = c['c_crossattn']
+
+                if image_conditioning is not None:
+                    image_conditioning_buffer = BytesIO()
+                    torch.save(image_conditioning, image_conditioning_buffer)
+                    image_conditioning_buffer.seek(0)
+
                 _d = Document(
                     embedding=c,
                     blob=buffered.getvalue(),
@@ -407,6 +448,9 @@ class StableDiffusionGenerator(Executor):
                     tags={
                         'latent_repr': base64.b64encode(
                             samples_buffer.getvalue()).decode(),
+                        'image_conditioning': base64.b64encode(
+                            image_conditioning_buffer.getvalue()).decode()
+                            if image_conditioning is not None else None,
                         'request': {
                             'api': 'stableinterpolate',
                             'height': height,
